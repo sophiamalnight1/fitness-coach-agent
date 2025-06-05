@@ -1,0 +1,22 @@
+{
+  "user_id": "cf4caba2",
+  "profile": {
+    "personal_info": {
+      "age": 28,
+      "weight": 65.0,
+      "height": 169.0,
+      "gender": "Female"
+    },
+    "fitness_history": "I've been doing strength training for the past 4 years, but I have had to take a break due to travelling and scheduling issues for the past 3 months. However, I have started to get back into it. My usual split was push, pull, legs (quad focus), legs (glutes and hamstrings focus). I have had knee pain in the past which has caused me to not be able to run, but I did one 3km run recently and while it did hurt it was better. I have had very little cardio in my routine, so I am looking to include this more. I don't own a bike, spinning is quite far from my house so running seems to be the best option. For stretching I have not been very good with this in the past but I know it's super important. I have tried yin yoga a couple of times and I loved it.",
+    "primary_goal": "Run 10km while being safe with my knee, Increase flexibility and Gain strength",
+    "timeline": "6 months",
+    "preferences": {
+      "cardio": "Running is easiest most weeks, or anything needing gym equipment (so rowing for example)",
+      "strength": "I like splitting by muscle groups, so push pull legs or if I cannot get many workouts in then I would do lower body and upper body",
+      "flexibility": "Love yin yoga, need to increase overall mobility, any stretches that could help my knee with running would be good.",
+      "dislikes": "Nothing that requires too much time like swimming, and I don't want to buy new equipment - e.g. I don't have a bike."
+    }
+  },
+  "created_at": "2025-06-05T15:13:54.597504",
+  "last_updated": "2025-06-05T15:13:54.597504"
+}
