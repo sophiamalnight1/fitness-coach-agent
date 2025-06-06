@@ -8,10 +8,11 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+import pytz  # Add this import for timezone handling
 
 
 class GoogleCalendarService:
-    """Fixed Google Calendar integration with proper expiry handling."""
+    """Fixed Google Calendar integration with proper timezone handling."""
     
     SCOPES = ['https://www.googleapis.com/auth/calendar']
     
@@ -19,6 +20,9 @@ class GoogleCalendarService:
         """Initialize the Google Calendar service."""
         self.service = None
         self.credentials = None
+        # Set default timezone - you can make this configurable
+        self.timezone = pytz.timezone('America/New_York')  # Make this configurable
+        
         # Try to initialize service if credentials exist
         if 'google_credentials' in st.session_state:
             try:
@@ -26,6 +30,262 @@ class GoogleCalendarService:
             except Exception as e:
                 print(f"DEBUG: Failed to initialize service in __init__: {e}")
     
+    def _make_timezone_aware(self, dt: datetime) -> datetime:
+        """Convert naive datetime to timezone-aware datetime."""
+        if dt.tzinfo is None:
+            return self.timezone.localize(dt)
+        return dt
+    
+    def _make_timezone_naive(self, dt: datetime) -> datetime:
+        """Convert timezone-aware datetime to naive datetime in local timezone."""
+        if dt.tzinfo is not None:
+            return dt.astimezone(self.timezone).replace(tzinfo=None)
+        return dt
+
+    def get_busy_times(self, start_date: datetime, end_date: datetime, 
+                      calendar_ids: List[str] = None) -> List[Dict]:
+        """Get busy times from calendar(s) with fixed timezone handling."""
+        if not self.service:
+            self._initialize_service()
+        
+        if not calendar_ids:
+            # Use primary calendar
+            calendars = self.get_calendars()
+            calendar_ids = [cal['id'] for cal in calendars if cal['primary']]
+        
+        try:
+            # FIXED: Ensure start_date and end_date are timezone-aware
+            start_aware = self._make_timezone_aware(start_date)
+            end_aware = self._make_timezone_aware(end_date)
+            
+            freebusy_query = {
+                'timeMin': start_aware.isoformat(),
+                'timeMax': end_aware.isoformat(),
+                'items': [{'id': cal_id} for cal_id in calendar_ids]
+            }
+            
+            freebusy_result = self.service.freebusy().query(body=freebusy_query).execute()
+            
+            busy_times = []
+            for cal_id in calendar_ids:
+                if cal_id in freebusy_result['calendars']:
+                    for busy_period in freebusy_result['calendars'][cal_id]['busy']:
+                        # FIXED: Parse ISO format properly and convert to naive datetime
+                        start_str = busy_period['start']
+                        end_str = busy_period['end']
+                        
+                        # Parse ISO datetime strings
+                        busy_start = datetime.fromisoformat(start_str.replace('Z', '+00:00'))
+                        busy_end = datetime.fromisoformat(end_str.replace('Z', '+00:00'))
+                        
+                        # Convert to local timezone and make naive
+                        busy_start_naive = self._make_timezone_naive(busy_start)
+                        busy_end_naive = self._make_timezone_naive(busy_end)
+                        
+                        busy_times.append({
+                            'start': busy_start_naive,
+                            'end': busy_end_naive,
+                            'calendar_id': cal_id
+                        })
+            
+            return busy_times
+            
+        except HttpError as e:
+            print(f"Error fetching busy times: {e}")
+            return []
+
+    def find_available_slots(self, start_date: datetime, end_date: datetime,
+                           duration_minutes: int, work_hours: Dict = None,
+                           preferences: Dict = None) -> List[Dict]:
+        """Find available time slots for workouts with fixed timezone handling."""
+        # FIXED: Ensure all datetime objects are naive for consistent comparison
+        start_naive = self._make_timezone_naive(start_date) if start_date.tzinfo else start_date
+        end_naive = self._make_timezone_naive(end_date) if end_date.tzinfo else end_date
+        
+        # Get busy times (these will be returned as naive datetimes)
+        busy_times = self.get_busy_times(start_naive, end_naive)
+        
+        # Default work hours if not provided
+        if not work_hours:
+            work_hours = {
+                'start_time': time(9, 0),  # 9 AM
+                'end_time': time(17, 0),   # 5 PM
+                'work_days': ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+                'allow_lunch_workouts': True,
+                'lunch_start': time(12, 0),
+                'lunch_end': time(13, 0)
+            }
+        
+        available_slots = []
+        current_date = start_naive.date()
+        
+        while current_date <= end_naive.date():
+            day_name = current_date.strftime('%A')
+            
+            # Define potential workout windows
+            workout_windows = self._get_workout_windows(current_date, work_hours, day_name)
+            
+            # Check each window for availability
+            for window_start, window_end, window_type in workout_windows:
+                # FIXED: Ensure window times are naive
+                window_start_naive = self._make_timezone_naive(window_start) if window_start.tzinfo else window_start
+                window_end_naive = self._make_timezone_naive(window_end) if window_end.tzinfo else window_end
+                
+                available_slots.extend(
+                    self._find_slots_in_window(
+                        window_start_naive, window_end_naive, duration_minutes, 
+                        busy_times, window_type, preferences
+                    )
+                )
+            
+            current_date += timedelta(days=1)
+        
+        return available_slots
+    
+    def _get_workout_windows(self, date: datetime.date, work_hours: Dict, day_name: str) -> List[Tuple]:
+        """Get potential workout time windows for a day - returns naive datetimes."""
+        windows = []
+        
+        # Create naive datetime objects
+        work_start = datetime.combine(date, work_hours['start_time'])
+        work_end = datetime.combine(date, work_hours['end_time'])
+        
+        # Early morning (6 AM - work start)
+        early_start = datetime.combine(date, time(6, 0))
+        if early_start < work_start:
+            windows.append((early_start, work_start, 'early_morning'))
+        
+        # Lunch break (if allowed and it's a work day)
+        if (work_hours.get('allow_lunch_workouts', False) and 
+            day_name in work_hours.get('work_days', [])):
+            lunch_start = datetime.combine(date, work_hours.get('lunch_start', time(12, 0)))
+            lunch_end = datetime.combine(date, work_hours.get('lunch_end', time(13, 0)))
+            windows.append((lunch_start, lunch_end, 'lunch'))
+        
+        # Evening (work end - 10 PM)
+        evening_end = datetime.combine(date, time(22, 0))
+        if work_end < evening_end:
+            # If weekend, start earlier
+            if day_name not in work_hours.get('work_days', []):
+                afternoon_start = datetime.combine(date, time(14, 0))
+                windows.append((afternoon_start, evening_end, 'afternoon'))
+            else:
+                windows.append((work_end, evening_end, 'evening'))
+        
+        return windows
+    
+    def _find_slots_in_window(self, window_start: datetime, window_end: datetime,
+                            duration_minutes: int, busy_times: List[Dict],
+                            window_type: str, preferences: Dict = None) -> List[Dict]:
+        """Find available slots within a specific time window - all naive datetimes."""
+        slots = []
+        slot_duration = timedelta(minutes=duration_minutes)
+        
+        # FIXED: All datetime objects are now naive, so comparison should work
+        # Filter busy times that overlap with this window
+        relevant_busy = [
+            busy for busy in busy_times
+            if not (busy['end'] <= window_start or busy['start'] >= window_end)
+        ]
+        
+        # Sort by start time
+        relevant_busy.sort(key=lambda x: x['start'])
+        
+        current_time = window_start
+        
+        # Check for slots before first busy period
+        if relevant_busy and relevant_busy[0]['start'] > current_time:
+            potential_end = min(relevant_busy[0]['start'], window_end)
+            if potential_end - current_time >= slot_duration:
+                slots.append({
+                    'start': current_time,
+                    'end': current_time + slot_duration,
+                    'window_type': window_type,
+                    'available_duration': int((potential_end - current_time).total_seconds() / 60)
+                })
+        
+        # Check for slots between busy periods
+        for i in range(len(relevant_busy) - 1):
+            gap_start = relevant_busy[i]['end']
+            gap_end = relevant_busy[i + 1]['start']
+            
+            if gap_start < gap_end and gap_end - gap_start >= slot_duration:
+                slots.append({
+                    'start': gap_start,
+                    'end': gap_start + slot_duration,
+                    'window_type': window_type,
+                    'available_duration': int((gap_end - gap_start).total_seconds() / 60)
+                })
+        
+        # Check for slots after last busy period
+        if relevant_busy:
+            last_busy_end = relevant_busy[-1]['end']
+            if last_busy_end < window_end and window_end - last_busy_end >= slot_duration:
+                slots.append({
+                    'start': last_busy_end,
+                    'end': last_busy_end + slot_duration,
+                    'window_type': window_type,
+                    'available_duration': int((window_end - last_busy_end).total_seconds() / 60)
+                })
+        elif window_end - window_start >= slot_duration:
+            # No busy periods in this window
+            slots.append({
+                'start': window_start,
+                'end': window_start + slot_duration,
+                'window_type': window_type,
+                'available_duration': int((window_end - window_start).total_seconds() / 60)
+            })
+        
+        return slots
+    
+    def create_workout_event(self, workout_details: Dict, start_time: datetime,
+                           duration_minutes: int, calendar_id: str = 'primary') -> str:
+        """Create a workout event in Google Calendar with proper timezone handling."""
+        if not self.service:
+            self._initialize_service()
+        
+        # FIXED: Ensure start_time is timezone-aware for Google Calendar API
+        start_aware = self._make_timezone_aware(start_time)
+        end_aware = start_aware + timedelta(minutes=duration_minutes)
+        
+        event = {
+            'summary': f"🏋️‍♂️ {workout_details.get('type', 'Workout')} - {workout_details.get('focus', '')}",
+            'description': self._format_workout_description(workout_details),
+            'start': {
+                'dateTime': start_aware.isoformat(),
+                'timeZone': str(self.timezone),
+            },
+            'end': {
+                'dateTime': end_aware.isoformat(),
+                'timeZone': str(self.timezone),
+            },
+            'reminders': {
+                'useDefault': False,
+                'overrides': [
+                    {'method': 'popup', 'minutes': 15},
+                    {'method': 'popup', 'minutes': 5},
+                ],
+            },
+            'colorId': '4',  # Green color for workouts
+        }
+        
+        # Add location if specified
+        location = workout_details.get('location', '')
+        if location and location != 'N/A':
+            event['location'] = location
+        
+        try:
+            created_event = self.service.events().insert(
+                calendarId=calendar_id, body=event
+            ).execute()
+            
+            return created_event['id']
+            
+        except HttpError as e:
+            print(f"Error creating event: {e}")
+            return None
+
+    # ... (rest of the methods remain the same)
     def is_authenticated(self) -> bool:
         """Check if user is authenticated with Google Calendar - FIXED."""
         try:
@@ -341,221 +601,6 @@ class GoogleCalendarService:
         except HttpError as e:
             print(f"Error fetching calendars: {e}")
             return []
-    
-    def get_busy_times(self, start_date: datetime, end_date: datetime, 
-                      calendar_ids: List[str] = None) -> List[Dict]:
-        """Get busy times from calendar(s)."""
-        if not self.service:
-            self._initialize_service()
-        
-        if not calendar_ids:
-            # Use primary calendar
-            calendars = self.get_calendars()
-            calendar_ids = [cal['id'] for cal in calendars if cal['primary']]
-        
-        try:
-            freebusy_query = {
-                'timeMin': start_date.isoformat() + 'Z',
-                'timeMax': end_date.isoformat() + 'Z',
-                'items': [{'id': cal_id} for cal_id in calendar_ids]
-            }
-            
-            freebusy_result = self.service.freebusy().query(body=freebusy_query).execute()
-            
-            busy_times = []
-            for cal_id in calendar_ids:
-                if cal_id in freebusy_result['calendars']:
-                    for busy_period in freebusy_result['calendars'][cal_id]['busy']:
-                        busy_times.append({
-                            'start': datetime.fromisoformat(busy_period['start'].replace('Z', '+00:00')),
-                            'end': datetime.fromisoformat(busy_period['end'].replace('Z', '+00:00')),
-                            'calendar_id': cal_id
-                        })
-            
-            return busy_times
-            
-        except HttpError as e:
-            print(f"Error fetching busy times: {e}")
-            return []
-    
-    def find_available_slots(self, start_date: datetime, end_date: datetime,
-                           duration_minutes: int, work_hours: Dict = None,
-                           preferences: Dict = None) -> List[Dict]:
-        """Find available time slots for workouts."""
-        # Get busy times
-        busy_times = self.get_busy_times(start_date, end_date)
-        
-        # Default work hours if not provided
-        if not work_hours:
-            work_hours = {
-                'start_time': time(9, 0),  # 9 AM
-                'end_time': time(17, 0),   # 5 PM
-                'work_days': ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
-                'allow_lunch_workouts': True,
-                'lunch_start': time(12, 0),
-                'lunch_end': time(13, 0)
-            }
-        
-        available_slots = []
-        current_date = start_date.date()
-        
-        while current_date <= end_date.date():
-            day_name = current_date.strftime('%A')
-            
-            # Define potential workout windows
-            workout_windows = self._get_workout_windows(current_date, work_hours, day_name)
-            
-            # Check each window for availability
-            for window_start, window_end, window_type in workout_windows:
-                available_slots.extend(
-                    self._find_slots_in_window(
-                        window_start, window_end, duration_minutes, 
-                        busy_times, window_type, preferences
-                    )
-                )
-            
-            current_date += timedelta(days=1)
-        
-        return available_slots
-    
-    def _get_workout_windows(self, date: datetime.date, work_hours: Dict, day_name: str) -> List[Tuple]:
-        """Get potential workout time windows for a day."""
-        windows = []
-        
-        work_start = datetime.combine(date, work_hours['start_time'])
-        work_end = datetime.combine(date, work_hours['end_time'])
-        
-        # Early morning (6 AM - work start)
-        early_start = datetime.combine(date, time(6, 0))
-        if early_start < work_start:
-            windows.append((early_start, work_start, 'early_morning'))
-        
-        # Lunch break (if allowed and it's a work day)
-        if (work_hours.get('allow_lunch_workouts', False) and 
-            day_name in work_hours.get('work_days', [])):
-            lunch_start = datetime.combine(date, work_hours.get('lunch_start', time(12, 0)))
-            lunch_end = datetime.combine(date, work_hours.get('lunch_end', time(13, 0)))
-            windows.append((lunch_start, lunch_end, 'lunch'))
-        
-        # Evening (work end - 10 PM)
-        evening_end = datetime.combine(date, time(22, 0))
-        if work_end < evening_end:
-            # If weekend, start earlier
-            if day_name not in work_hours.get('work_days', []):
-                afternoon_start = datetime.combine(date, time(14, 0))
-                windows.append((afternoon_start, evening_end, 'afternoon'))
-            else:
-                windows.append((work_end, evening_end, 'evening'))
-        
-        return windows
-    
-    def _find_slots_in_window(self, window_start: datetime, window_end: datetime,
-                            duration_minutes: int, busy_times: List[Dict],
-                            window_type: str, preferences: Dict = None) -> List[Dict]:
-        """Find available slots within a specific time window."""
-        slots = []
-        slot_duration = timedelta(minutes=duration_minutes)
-        
-        # Filter busy times that overlap with this window
-        relevant_busy = [
-            busy for busy in busy_times
-            if not (busy['end'] <= window_start or busy['start'] >= window_end)
-        ]
-        
-        # Sort by start time
-        relevant_busy.sort(key=lambda x: x['start'])
-        
-        current_time = window_start
-        
-        # Check for slots before first busy period
-        if relevant_busy and relevant_busy[0]['start'] > current_time:
-            potential_end = min(relevant_busy[0]['start'], window_end)
-            if potential_end - current_time >= slot_duration:
-                slots.append({
-                    'start': current_time,
-                    'end': current_time + slot_duration,
-                    'window_type': window_type,
-                    'available_duration': int((potential_end - current_time).total_seconds() / 60)
-                })
-        
-        # Check for slots between busy periods
-        for i in range(len(relevant_busy) - 1):
-            gap_start = relevant_busy[i]['end']
-            gap_end = relevant_busy[i + 1]['start']
-            
-            if gap_start < gap_end and gap_end - gap_start >= slot_duration:
-                slots.append({
-                    'start': gap_start,
-                    'end': gap_start + slot_duration,
-                    'window_type': window_type,
-                    'available_duration': int((gap_end - gap_start).total_seconds() / 60)
-                })
-        
-        # Check for slots after last busy period
-        if relevant_busy:
-            last_busy_end = relevant_busy[-1]['end']
-            if last_busy_end < window_end and window_end - last_busy_end >= slot_duration:
-                slots.append({
-                    'start': last_busy_end,
-                    'end': last_busy_end + slot_duration,
-                    'window_type': window_type,
-                    'available_duration': int((window_end - last_busy_end).total_seconds() / 60)
-                })
-        elif window_end - window_start >= slot_duration:
-            # No busy periods in this window
-            slots.append({
-                'start': window_start,
-                'end': window_start + slot_duration,
-                'window_type': window_type,
-                'available_duration': int((window_end - window_start).total_seconds() / 60)
-            })
-        
-        return slots
-    
-    def create_workout_event(self, workout_details: Dict, start_time: datetime,
-                           duration_minutes: int, calendar_id: str = 'primary') -> str:
-        """Create a workout event in Google Calendar."""
-        if not self.service:
-            self._initialize_service()
-        
-        end_time = start_time + timedelta(minutes=duration_minutes)
-        
-        event = {
-            'summary': f"🏋️‍♂️ {workout_details.get('type', 'Workout')} - {workout_details.get('focus', '')}",
-            'description': self._format_workout_description(workout_details),
-            'start': {
-                'dateTime': start_time.isoformat(),
-                'timeZone': 'America/New_York',  # You might want to make this configurable
-            },
-            'end': {
-                'dateTime': end_time.isoformat(),
-                'timeZone': 'America/New_York',
-            },
-            'reminders': {
-                'useDefault': False,
-                'overrides': [
-                    {'method': 'popup', 'minutes': 15},
-                    {'method': 'popup', 'minutes': 5},
-                ],
-            },
-            'colorId': '4',  # Green color for workouts
-        }
-        
-        # Add location if specified
-        location = workout_details.get('location', '')
-        if location and location != 'N/A':
-            event['location'] = location
-        
-        try:
-            created_event = self.service.events().insert(
-                calendarId=calendar_id, body=event
-            ).execute()
-            
-            return created_event['id']
-            
-        except HttpError as e:
-            print(f"Error creating event: {e}")
-            return None
     
     def _format_workout_description(self, workout_details: Dict) -> str:
         """Format workout details for calendar event description."""
