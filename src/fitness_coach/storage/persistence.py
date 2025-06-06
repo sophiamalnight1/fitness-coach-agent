@@ -274,3 +274,35 @@ class FitnessCoachStorage:
             "total_schedules": num_schedules,
             "total_feedback": num_feedback
         }
+    
+    def save_calendar_preferences(self, preferences: Dict) -> str:
+        """Save calendar and work hour preferences."""
+        user_id = self._get_user_id()
+        prefs_file = self.data_dir / "profiles" / f"calendar_prefs_{user_id}.json"
+        
+        prefs_data = {
+            "user_id": user_id,
+            "preferences": preferences,
+            "created_at": datetime.now().isoformat(),
+            "last_updated": datetime.now().isoformat()
+        }
+        
+        with open(prefs_file, 'w') as f:
+            json.dump(prefs_data, f, indent=2, default=str)
+        
+        print(f"✅ Calendar preferences saved for user {user_id}")
+        return user_id
+
+    def load_calendar_preferences(self) -> Optional[Dict]:
+        """Load calendar and work hour preferences."""
+        user_id = self._get_user_id()
+        prefs_file = self.data_dir / "profiles" / f"calendar_prefs_{user_id}.json"
+        
+        if prefs_file.exists():
+            with open(prefs_file, 'r') as f:
+                data = json.load(f)
+                print(f"✅ Calendar preferences loaded for user {user_id}")
+                return data.get("preferences", {})
+        
+        print(f"ℹ️ No calendar preferences found for user {user_id}")
+        return None

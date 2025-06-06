@@ -1,10 +1,9 @@
-"""Enhanced Streamlit UI with persistent storage."""
-
+import os
 import streamlit as st
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from fitness_coach.core.coach import AIFitnessCoach
 from fitness_coach.config.settings import settings
-from langgraph.graph import StateGraph, END
+from fitness_coach.integrations.google_calendar import GoogleCalendarService
 
 
 def initialize_app():
@@ -18,6 +17,10 @@ def initialize_app():
         except Exception as e:
             st.error(f"Error initializing AI Fitness Coach: {str(e)}")
             st.stop()
+    
+    # Initialize calendar service
+    if "calendar_service" not in st.session_state:
+        st.session_state.calendar_service = GoogleCalendarService()
     
     # Initialize user stats
     if "user_stats" not in st.session_state:
@@ -36,7 +39,6 @@ def initialize_app():
     # Initialize user profile
     if "user_profile" not in st.session_state:
         try:
-            # Try to load existing profile
             initial_state = st.session_state.fitness_coach.get_initial_state()
             st.session_state.user_profile = initial_state.get("user_profile")
             print(f"✅ User profile loaded: {'exists' if st.session_state.user_profile else 'none'}")
@@ -70,13 +72,17 @@ def initialize_app():
     
     if "updating_profile" not in st.session_state:
         st.session_state.updating_profile = False
-
+    
     # Initialize macro plan feedback state
     if "newly_created_macro_plan" not in st.session_state:
         st.session_state.newly_created_macro_plan = None
     
     if "reference_week_index" not in st.session_state:
         st.session_state.reference_week_index = None
+    
+    # Initialize calendar setup state
+    if "show_calendar_setup" not in st.session_state:
+        st.session_state.show_calendar_setup = False
 
 
 def render_profile_setup():
@@ -242,7 +248,8 @@ def render_current_schedule():
         st.caption(f"Created: {schedule.get('created_at', 'Unknown')[:10]}")
     with col2:
         if st.button("🔄 Create New Week"):
-            st.switch_page("Create New Schedule")  # Switch to creation tab
+            # Set tab to schedule creation
+            st.info("👆 Go to 'Create New Schedule' tab to create a new week")
     
     # Display macro plan context
     if schedule.get("macro_plan"):
@@ -259,19 +266,14 @@ def render_current_schedule():
             # Color code based on workout type
             if workout.get("type") == "Rest":
                 icon = "🛌"
-                color = "gray"
             elif "Cardio" in workout.get("type", ""):
                 icon = "🏃‍♂️"
-                color = "blue"
             elif "Strength" in workout.get("type", ""):
                 icon = "💪"
-                color = "red"
             elif "Yoga" in workout.get("type", "") or "Flexibility" in workout.get("type", ""):
                 icon = "🧘‍♀️"
-                color = "green"
             else:
                 icon = "🏋️‍♂️"
-                color = "orange"
             
             with st.expander(f"{icon} {day} - {workout.get('type', 'Rest')}", expanded=False):
                 if workout.get("type") != "Rest":
@@ -322,42 +324,8 @@ def render_current_schedule():
                         st.rerun()
 
 
-def render_schedule_history():
-    """Display schedule history."""
-    st.header("📚 Schedule History")
-    
-    if not st.session_state.schedule_history:
-        st.info("No schedule history found.")
-        return
-    
-    st.write(f"Total schedules: {len(st.session_state.schedule_history)}")
-    
-    for i, schedule in enumerate(st.session_state.schedule_history):
-        schedule_id = schedule.get("schedule_id", f"Schedule {i+1}")
-        created_date = schedule.get("created_at", "Unknown date")
-        
-        with st.expander(f"📋 {schedule_id} - {created_date}"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write("**Macro Plan:**")
-                st.write(schedule.get("macro_plan", "No macro plan"))
-            
-            with col2:
-                if st.button(f"🔄 Reactivate", key=f"reactivate_{i}"):
-                    st.session_state.fitness_coach.activate_schedule(schedule_id)
-                    st.session_state.active_schedule = schedule
-                    st.success(f"✅ {schedule_id} reactivated!")
-                    st.rerun()
-            
-            if schedule.get("micro_plan"):
-                st.write("**Weekly Plan:**")
-                for day, workout in schedule["micro_plan"].items():
-                    st.write(f"- **{day}**: {workout.get('type', 'Rest')} ({workout.get('duration', 'N/A')})")
-
-
 def render_schedule_creation():
-    """Enhanced schedule creation with proper routing."""
+    """Enhanced schedule creation with macro/micro options and calendar integration for weekly only."""
     st.header("🆕 Create New Schedule")
     
     if not st.session_state.user_profile:
@@ -377,33 +345,34 @@ def render_schedule_creation():
             "🔄 Create new weekly schedule (building from last week)",
             "📈 Create new macro plan (will replace current plan)"
         ],
-        key="creation_option_radio"  # Add unique key
+        key="creation_option_radio"
     )
     
     # Route based on selection
     if "Create new macro plan" in creation_option:
-        # Macro plan creation
+        # Macro plan creation (no calendar integration needed)
         render_macro_plan_creation()
     
     elif "following current macro plan" in creation_option:
-        # Weekly schedule following macro plan
+        # Weekly schedule following macro plan (WITH calendar integration)
         if not macro_plan:
             st.warning("⚠️ No macro plan found. Please create a macro plan first.")
             st.info("👆 Select 'Create new macro plan' option above to get started.")
         else:
-            render_weekly_schedule_creation(mode="macro")
+            render_weekly_schedule_creation_with_calendar(mode="macro")
     
     elif "building from last week" in creation_option:
-        # Weekly schedule building from previous week
+        # Weekly schedule building from previous week (WITH calendar integration)
         recent_schedules = st.session_state.fitness_coach.get_recent_schedules()
         if not recent_schedules:
             st.warning("⚠️ No previous schedules found. Creating fresh schedule.")
-            render_weekly_schedule_creation(mode="fresh")
+            render_weekly_schedule_creation_with_calendar(mode="fresh")
         else:
-            render_weekly_schedule_creation(mode="progressive")
+            render_weekly_schedule_creation_with_calendar(mode="progressive")
+
 
 def render_macro_plan_creation():
-    """Enhanced macro plan creation with feedback and regeneration."""
+    """Enhanced macro plan creation with feedback and regeneration (NO calendar integration)."""
     st.subheader("📈 Create New Macro Plan")
     
     # Show current macro plan if exists
@@ -487,6 +456,7 @@ def render_macro_plan_creation():
             if st.button("❌ Cancel", key="cancel_macro_btn"):
                 st.rerun()
 
+
 def render_macro_plan_feedback():
     """Handle feedback and regeneration for newly created macro plan."""
     st.subheader("📈 Your New Macro Plan")
@@ -519,11 +489,7 @@ def render_macro_plan_feedback():
                 # Clear the temporary storage and activate
                 st.session_state.newly_created_macro_plan = None
                 st.success("🎉 Macro plan activated! You can now create weekly schedules.")
-                
-                # Auto-switch to weekly schedule creation
-                if st.button("📅 Create First Weekly Schedule", key="create_first_weekly_btn"):
-                    st.session_state.creation_option_radio = "📅 Create new weekly schedule (following current macro plan)"
-                    st.rerun()
+                st.rerun()
         
         with col2:
             if st.button("🔄 Make Changes First", key="modify_macro_btn"):
@@ -642,9 +608,8 @@ def render_macro_plan_feedback():
             st.rerun()
 
 
-
-def render_weekly_schedule_creation(mode: str = "macro"):
-    """Create weekly schedule with different modes - FIXED ROUTING."""
+def render_weekly_schedule_creation_with_calendar(mode: str = "macro"):
+    """Enhanced weekly schedule creation with calendar integration - FIXED."""
     st.subheader("📅 Create Weekly Schedule")
     
     if mode == "macro":
@@ -662,133 +627,66 @@ def render_weekly_schedule_creation(mode: str = "macro"):
     else:
         st.info("🆕 Creating fresh schedule")
     
-    # Week selection for progressive mode
-    if mode == "progressive":
-        recent_schedules = st.session_state.fitness_coach.get_recent_schedules()
-        if recent_schedules:
-            reference_week = st.selectbox(
-                "Build from which week?",
-                options=[(i, f"Week {i+1} ago - {sched['schedule']['schedule_id']}") 
-                        for i, sched in enumerate(recent_schedules)],
-                format_func=lambda x: x[1]
-            )
-            st.session_state.reference_week_index = reference_week[0]
+    # Calendar integration status and quick setup - FIXED: Remove nested expander
+    cal_service = st.session_state.calendar_service
+    calendar_prefs = st.session_state.fitness_coach.storage.load_calendar_preferences()
     
-    # Availability input
-    st.subheader("🗓️ Your Availability This Week")
+    # Check if we're in calendar setup mode
+    if st.session_state.get("show_calendar_setup", False):
+        # Show calendar setup directly without expander
+        render_quick_calendar_setup()
+        
+        # Back button
+        if st.button("⬅️ Back to Schedule Creation", key="back_to_schedule"):
+            st.session_state.show_calendar_setup = False
+            st.rerun()
+        return
     
-    # Quick setup or detailed setup
-    setup_type = st.radio(
+    # Calendar setup section - FIXED: Don't nest expanders
+    st.subheader("📅 Calendar Integration (Optional)")
+    
+    if not cal_service.is_authenticated():
+        st.info("Connect your calendar to automatically detect free time slots!")
+        
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("🔗 Quick Calendar Setup", key="quick_cal_setup"):
+                st.session_state.show_calendar_setup = True
+                st.rerun()
+        
+        with col2:
+            st.write("**Benefits:**")
+            st.write("• Automatic conflict detection")
+            st.write("• One-click workout booking")
+            st.write("• Smart availability detection")
+    else:
+        st.success("✅ Calendar connected!")
+        if not calendar_prefs:
+            st.warning("⚙️ Set up work hours for better scheduling")
+            if st.button("⚙️ Configure Work Hours", key="setup_work_hours"):
+                render_quick_work_hours_setup()
+        else:
+            st.info(f"Work hours: {calendar_prefs.get('work_start', '9:00')} - {calendar_prefs.get('work_end', '17:00')}")
+    
+    # Availability method selection
+    availability_methods = ["⚙️ Manual Setup"]
+    if cal_service.is_authenticated():
+        availability_methods.insert(0, "🗓️ Use Calendar + Manual Override")
+    
+    availability_method = st.radio(
         "How would you like to set your availability?",
-        ["⚡ Quick Setup (same pattern)", "🔧 Detailed Setup (day by day)"],
-        key="availability_setup_type"
+        availability_methods,
+        key="availability_method_radio"
     )
     
-    availability = {}
-    
-    if "Quick Setup" in setup_type:
-        # Quick availability setup
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            workout_days = st.number_input(
-                "Workouts per week:",
-                min_value=1, max_value=7, value=3
-            )
-            
-        with col2:
-            workout_duration = st.selectbox(
-                "Workout duration:",
-                ["30 minutes", "45 minutes", "60 minutes", "90 minutes"],
-                index=1
-            )
-            
-        with col3:
-            preferred_time = st.selectbox(
-                "Preferred time:",
-                ["Early Morning (6-8 AM)", "Morning (8-10 AM)", "Lunch (12-2 PM)", 
-                 "Afternoon (3-5 PM)", "Evening (6-8 PM)", "Night (8-10 PM)"],
-                index=4
-            )
-        
-        # Auto-assign days
-        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
-        
-        # Suggest optimal days based on workout count
-        if workout_days == 3:
-            suggested_days = ["Monday", "Wednesday", "Friday"]
-        elif workout_days == 4:
-            suggested_days = ["Monday", "Tuesday", "Thursday", "Friday"]
-        elif workout_days == 5:
-            suggested_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
-        elif workout_days == 6:
-            suggested_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-        else:
-            suggested_days = day_names[:workout_days]
-        
-        selected_days = st.multiselect(
-            "Workout days:",
-            day_names,
-            default=suggested_days[:workout_days]
-        )
-        
-        # Build availability
-        for day in day_names:
-            if day in selected_days:
-                availability[day] = {
-                    "available": True,
-                    "preferred_time": preferred_time,
-                    "duration": workout_duration
-                }
-            else:
-                availability[day] = {"available": False}
-                
+    # Get availability based on method
+    if "Calendar" in availability_method and cal_service.is_authenticated():
+        availability = render_calendar_based_availability(cal_service, calendar_prefs)
     else:
-        # Detailed day-by-day setup
-        st.write("**Set availability for each day:**")
-        
-        for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
-            col1, col2, col3 = st.columns([2, 3, 2])
-            
-            with col1:
-                available = st.checkbox(f"**{day}**", key=f"available_{day}")
-            
-            with col2:
-                if available:
-                    time_slot = st.selectbox(
-                        "Time:",
-                        ["Early Morning", "Morning", "Lunch", "Afternoon", "Evening", "Night"],
-                        key=f"time_{day}"
-                    )
-                else:
-                    time_slot = None
-            
-            with col3:
-                if available:
-                    duration = st.selectbox(
-                        "Duration:",
-                        ["30 min", "45 min", "60 min", "90 min"],
-                        key=f"duration_{day}"
-                    )
-                else:
-                    duration = None
-            
-            availability[day] = {
-                "available": available,
-                "preferred_time": time_slot,
-                "duration": duration
-            } if available else {"available": False}
+        availability = render_manual_availability_setup()
     
     # Show availability summary
-    with st.expander("📋 Availability Summary", expanded=True):
-        workout_count = sum(1 for day_avail in availability.values() if day_avail.get("available"))
-        st.write(f"**Total workout days:** {workout_count}")
-        
-        for day, avail in availability.items():
-            if avail["available"]:
-                st.write(f"✅ **{day}**: {avail['duration']} at {avail['preferred_time']}")
-            else:
-                st.write(f"🛌 **{day}**: Rest day")
+    render_availability_summary(availability)
     
     # Additional preferences
     st.subheader("🎯 This Week's Focus")
@@ -808,10 +706,9 @@ def render_weekly_schedule_creation(mode: str = "macro"):
             index=1
         )
     
-    # Special notes
     special_notes = st.text_area(
         "Special notes for this week:",
-        placeholder="e.g., feeling tired, have an event coming up, want to try something new, sore from last week...",
+        placeholder="e.g., feeling tired, have an event coming up, want to try something new...",
         height=80
     )
     
@@ -820,78 +717,603 @@ def render_weekly_schedule_creation(mode: str = "macro"):
         "mode": mode,
         "focus_areas": focus_areas,
         "intensity_level": intensity_level,
-        "special_notes": special_notes
+        "special_notes": special_notes,
+        "calendar_integration": "Calendar" in availability_method
     }
     
-    if mode == "progressive" and st.session_state.get("reference_week_index") is not None:
-        preferences["reference_week_index"] = st.session_state.reference_week_index
-    
-    # Generate button
+    # Generate and schedule buttons
     col1, col2 = st.columns(2)
+    
     with col1:
-        if st.button("🎯 Generate Weekly Schedule", type="primary", key="generate_weekly_btn"):
-            # Validate availability
-            workout_days = sum(1 for day_avail in availability.values() if day_avail.get("available"))
-            if workout_days == 0:
-                st.error("❌ Please select at least one workout day!")
-                return
-                
-            with st.spinner("Creating your personalized weekly schedule..."):
-                try:
-                    print("UI: Starting schedule creation...")
-                    print(f"UI: Availability = {availability}")
-                    print(f"UI: Preferences = {preferences}")
-                    
-                    # Create the schedule
-                    schedule = st.session_state.fitness_coach.create_weekly_schedule(
-                        availability, preferences
-                    )
-                    
-                    print(f"UI: Schedule result = {schedule}")
-                    print(f"UI: Schedule has micro_plan = {schedule.get('micro_plan') is not None}")
-                    
-                    if schedule and schedule.get("micro_plan"):
-                        st.success("✅ Weekly schedule created successfully!")
-                        
-                        # Update session state
-                        st.session_state.active_schedule = schedule
-                        
-                        # Show preview
-                        render_schedule_preview(schedule)
-                        
-                    elif schedule:
-                        st.warning("⚠️ Schedule was created but may be incomplete. Please check the details.")
-                        st.write("Debug - Schedule data:", schedule)
-                        
-                        if schedule.get("micro_plan"):
-                            st.session_state.active_schedule = schedule
-                            render_schedule_preview(schedule)
-                        
-                    else:
-                        st.error("❌ Failed to create schedule. Please try again.")
-                        
-                        # Show debug information
-                        with st.expander("🔍 Debug Information"):
-                            st.write("**User Profile:**", st.session_state.user_profile is not None)
-                            st.write("**Macro Plan:**", st.session_state.fitness_coach.get_macro_plan() is not None)
-                            st.write("**Availability:**", availability)
-                            st.write("**Preferences:**", preferences)
-                        
-                except Exception as e:
-                    st.error(f"❌ Error creating schedule: {str(e)}")
-                    
-                    # Show detailed error information
-                    with st.expander("🔍 Error Details"):
-                        st.code(str(e))
-                        import traceback
-                        st.code(traceback.format_exc())
+        if st.button("🎯 Generate Weekly Schedule", type="primary", key="generate_weekly_cal_btn"):
+            generate_schedule_with_calendar(availability, preferences, cal_service)
     
     with col2:
-        if st.button("🔙 Back to Options", key="back_to_options_btn"):
+        if st.button("🔙 Back to Options", key="back_to_options_cal_btn"):
             st.rerun()
 
-def render_schedule_preview(schedule):
-    """Show preview of created schedule with activation option."""
+
+def render_quick_calendar_setup():
+    """Fixed quick calendar setup - NO nested expanders."""
+    st.subheader("🔗 Quick Calendar Setup")
+    
+    cal_service = st.session_state.calendar_service
+    
+    # Debug section as regular content (not expander)
+    if st.checkbox("🔍 Show Debug Information", key="show_debug_info"):
+        debug_calendar_state()
+    
+    # Initialize auth method state if not exists
+    if "auth_method_selection" not in st.session_state:
+        st.session_state.auth_method_selection = "🔗 URL Method (Easier)"
+    
+    # Method selection with persistent state
+    auth_method = st.radio(
+        "Choose authentication method:",
+        [
+            "🔗 URL Method (Easier)",
+            "📋 Code Method (Manual)"
+        ],
+        key="auth_method_radio",
+        index=0 if "URL Method" in st.session_state.auth_method_selection else 1
+    )
+    
+    # Update session state when method changes
+    if auth_method != st.session_state.auth_method_selection:
+        st.session_state.auth_method_selection = auth_method
+        st.rerun()
+    
+    # Show appropriate method based on selection
+    if "URL Method" in auth_method:
+        render_url_auth_method(cal_service)
+    else:
+        render_code_auth_method(cal_service)
+
+
+def render_url_auth_method(cal_service):
+    """Fixed URL-based authentication method with better success handling."""
+    st.markdown("### 🔗 URL Method")
+    
+    try:
+        # Generate auth URL
+        if st.button("🚀 Generate Authorization Link", key="generate_auth_url"):
+            with st.spinner("Generating authorization link..."):
+                auth_url = cal_service.get_auth_url()
+                st.session_state.auth_url = auth_url
+                st.session_state.show_auth_form = True
+        
+        # Show auth form if URL generated
+        if st.session_state.get("show_auth_form") and st.session_state.get("auth_url"):
+            st.success("✅ Authorization URL generated!")
+            
+            st.markdown(f"**[🚀 Click here to authorize Google Calendar]({st.session_state.auth_url})**")
+            
+            st.info("""
+            **Instructions:**
+            1. Click the link above
+            2. Sign in to Google and grant permissions
+            3. After authorization, you'll be redirected to a page that might show an error (this is normal)
+            4. Copy the ENTIRE URL from your browser's address bar
+            5. Paste it in the box below
+            """)
+            
+            callback_url = st.text_area(
+                "📋 Paste the full redirect URL here:",
+                placeholder="http://localhost:8501/?code=4/0AanRRTs...",
+                height=100,
+                key="callback_url_input"
+            )
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("✅ Connect with URL", key="connect_with_url") and callback_url:
+                    with st.spinner("Connecting to Google Calendar..."):
+                        try:
+                            print(f"DEBUG: Attempting to authenticate with URL: {callback_url[:100]}...")
+                            
+                            success = cal_service.authenticate_with_url(callback_url)
+                            
+                            if success:
+                                st.success("🎉 Calendar connected successfully!")
+                                
+                                # Double-check authentication after a brief delay
+                                import time
+                                time.sleep(0.5)  # Brief delay
+                                
+                                # Re-check authentication
+                                final_check = cal_service.is_authenticated()
+                                print(f"DEBUG: Final authentication check: {final_check}")
+                                
+                                if final_check:
+                                    # Clear the form state
+                                    st.session_state.show_auth_form = False
+                                    st.session_state.auth_url = None
+                                    st.session_state.show_calendar_setup = False
+                                    st.balloons()
+                                    st.rerun()
+                                else:
+                                    st.error("❌ Authentication verification failed. Please try again.")
+                            else:
+                                st.error("❌ Connection failed. Please check the URL and try again.")
+                                # Show debug info
+                                st.write("**Debug Info:**")
+                                st.write(f"URL length: {len(callback_url)}")
+                                st.write(f"Contains 'code=': {'code=' in callback_url}")
+                                
+                        except Exception as e:
+                            st.error(f"❌ Authentication error: {str(e)}")
+                            print(f"Full authentication error: {e}")
+                            import traceback
+                            traceback.print_exc()
+            
+            with col2:
+                if st.button("🔄 Generate New Link", key="regenerate_auth_url"):
+                    st.session_state.show_auth_form = False
+                    st.session_state.auth_url = None
+                    st.rerun()
+                    
+    except Exception as e:
+        st.error(f"Error setting up calendar: {str(e)}")
+        print(f"Setup error: {e}")
+
+def debug_calendar_state():
+    """Enhanced debug function."""
+    st.write("**Session State Debug:**")
+    
+    # Check for Google credentials
+    if 'google_credentials' in st.session_state:
+        creds_data = st.session_state.google_credentials
+        st.write("✅ Google credentials found in session state")
+        st.write(f"- Token exists: {bool(creds_data.get('token'))}")
+        st.write(f"- Refresh token exists: {bool(creds_data.get('refresh_token'))}")
+        st.write(f"- Client ID exists: {bool(creds_data.get('client_id'))}")
+        st.write(f"- Expiry: {creds_data.get('expiry', 'Not set')}")
+        
+        # Manual test button
+        if st.button("🔄 Force Re-initialize Service", key="force_reinit"):
+            try:
+                cal_service = st.session_state.calendar_service
+                cal_service._initialize_service()
+                auth_result = cal_service.is_authenticated()
+                st.write(f"Re-initialization result: {auth_result}")
+            except Exception as e:
+                st.error(f"Re-initialization failed: {e}")
+    else:
+        st.write("❌ No Google credentials in session state")
+    
+    # Check calendar service
+    cal_service = st.session_state.calendar_service
+    st.write(f"Calendar service authenticated: {cal_service.is_authenticated()}")
+    
+    # Check environment variables
+    st.write("**Environment Variables:**")
+    st.write(f"- GOOGLE_CLIENT_ID set: {bool(os.getenv('GOOGLE_CLIENT_ID'))}")
+    st.write(f"- GOOGLE_CLIENT_SECRET set: {bool(os.getenv('GOOGLE_CLIENT_SECRET'))}")
+    
+    # Clear credentials button for testing
+    if st.button("🗑️ Clear Stored Credentials", key="clear_creds"):
+        if 'google_credentials' in st.session_state:
+            del st.session_state.google_credentials
+        st.success("Credentials cleared!")
+        st.rerun()
+
+
+def render_code_auth_method(cal_service):
+    """Fixed code-based authentication method."""
+    st.markdown("### 📋 Code Method")
+    
+    try:
+        # Generate auth URL
+        if st.button("🚀 Generate Authorization Link", key="generate_auth_url_code"):
+            with st.spinner("Generating authorization link..."):
+                auth_url = cal_service.get_auth_url()
+                st.session_state.auth_url_code = auth_url
+                st.session_state.show_code_form = True
+        
+        # Show auth form if URL generated
+        if st.session_state.get("show_code_form") and st.session_state.get("auth_url_code"):
+            st.success("✅ Authorization URL generated!")
+            
+            st.markdown(f"**[🚀 Click here to authorize Google Calendar]({st.session_state.auth_url_code})**")
+            
+            st.info("""
+            **Instructions:**
+            1. Click the link above
+            2. Sign in to Google and grant permissions
+            3. You'll be redirected to: http://localhost:8501/?code=XXXXX
+            4. Copy only the code part (everything after 'code=' and before '&')
+            5. Paste it below
+            """)
+            
+            # Help section as regular content (not expander)
+            if st.checkbox("🔍 How to find the authorization code", key="show_code_help"):
+                st.write("""
+                After authorization, the URL will look like:
+                ```
+                http://localhost:8501/?code=4/0AanRRTsXXXXXXXXX&scope=https://www.googleapis.com/auth/calendar
+                ```
+                
+                Your authorization code is: `4/0AanRRTsXXXXXXXXX`
+                
+                Copy everything between `code=` and `&scope`
+                """)
+            
+            auth_code = st.text_input(
+                "📋 Authorization Code:",
+                placeholder="4/0AanRRTsXXXXXXXXX",
+                help="Paste only the code part, not the full URL",
+                key="auth_code_input"
+            )
+            
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                if st.button("✅ Connect with Code", key="connect_with_code") and auth_code:
+                    with st.spinner("Connecting to Google Calendar..."):
+                        try:
+                            print(f"DEBUG: Attempting to authenticate with code: {auth_code[:20]}...")
+                            
+                            success = cal_service.authenticate_with_code(auth_code)
+                            
+                            if success:
+                                st.success("🎉 Calendar connected successfully!")
+                                # Clear the form state
+                                st.session_state.show_code_form = False
+                                st.session_state.auth_url_code = None
+                                st.session_state.show_calendar_setup = False
+                                st.balloons()
+                                st.rerun()
+                            else:
+                                st.error("❌ Connection failed. Please check the code and try again.")
+                                
+                        except Exception as e:
+                            st.error(f"❌ Authentication error: {str(e)}")
+                            print(f"Code authentication error: {e}")
+            
+            with col2:
+                if st.button("🔄 Generate New Link", key="regenerate_auth_url_code"):
+                    st.session_state.show_code_form = False
+                    st.session_state.auth_url_code = None
+                    st.rerun()
+                    
+    except Exception as e:
+        st.error(f"Error setting up calendar: {str(e)}")
+        print(f"Setup error: {e}")
+
+
+def debug_calendar_state():
+    """Debug function to check calendar authentication state - simplified."""
+    st.write("**Session State Debug:**")
+    
+    # Check for Google credentials
+    if 'google_credentials' in st.session_state:
+        creds_data = st.session_state.google_credentials
+        st.write("✅ Google credentials found in session state")
+        st.write(f"- Token exists: {bool(creds_data.get('token'))}")
+        st.write(f"- Refresh token exists: {bool(creds_data.get('refresh_token'))}")
+        st.write(f"- Client ID exists: {bool(creds_data.get('client_id'))}")
+    else:
+        st.write("❌ No Google credentials in session state")
+    
+    # Check calendar service
+    cal_service = st.session_state.calendar_service
+    st.write(f"Calendar service authenticated: {cal_service.is_authenticated()}")
+    
+    # Check environment variables
+    st.write("**Environment Variables:**")
+    st.write(f"- GOOGLE_CLIENT_ID set: {bool(os.getenv('GOOGLE_CLIENT_ID'))}")
+    st.write(f"- GOOGLE_CLIENT_SECRET set: {bool(os.getenv('GOOGLE_CLIENT_SECRET'))}")
+
+
+def render_quick_work_hours_setup():
+    """Quick work hours setup."""
+    st.subheader("⚙️ Quick Work Hours Setup")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        work_start = st.time_input("Work starts:", value=time(9, 0))
+        work_end = st.time_input("Work ends:", value=time(17, 0))
+    
+    with col2:
+        work_days = st.multiselect(
+            "Work days:",
+            ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"],
+            default=["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        )
+        
+        allow_lunch = st.checkbox("Allow lunch workouts", value=True)
+    
+    if st.button("💾 Save Work Hours"):
+        preferences = {
+            'work_start': work_start.strftime('%H:%M'),
+            'work_end': work_end.strftime('%H:%M'),
+            'work_days': work_days,
+            'allow_lunch_workouts': allow_lunch,
+            'lunch_start': '12:00',
+            'lunch_end': '13:00'
+        }
+        
+        st.session_state.fitness_coach.storage.save_calendar_preferences(preferences)
+        st.success("✅ Work hours saved!")
+        st.rerun()
+
+
+def render_calendar_based_availability(cal_service, calendar_prefs):
+    """Render calendar-based availability detection with manual overrides."""
+    st.subheader("📅 Calendar-Detected Availability")
+    
+    try:
+        # Get next week's availability
+        start_date = datetime.now()
+        end_date = start_date + timedelta(days=7)
+        
+        with st.spinner("📖 Analyzing your calendar..."):
+            available_slots = cal_service.find_available_slots(
+                start_date, end_date,
+                duration_minutes=45,  # Default duration
+                work_hours=calendar_prefs or {},
+                preferences=calendar_prefs or {}
+            )
+        
+        # Group slots by day
+        slots_by_day = {}
+        for slot in available_slots:
+            day = slot['start'].strftime('%A')
+            if day not in slots_by_day:
+                slots_by_day[day] = []
+            slots_by_day[day].append(slot)
+        
+        availability = {}
+        
+        for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
+            with st.expander(f"📅 {day}", expanded=False):
+                day_slots = slots_by_day.get(day, [])
+                
+                if day_slots:
+                    st.success(f"✅ Found {len(day_slots)} available slots")
+                    
+                    # Show available slots
+                    slot_options = []
+                    for i, slot in enumerate(day_slots):
+                        time_str = slot['start'].strftime('%I:%M %p')
+                        window_type = slot['window_type'].replace('_', ' ').title()
+                        slot_options.append(f"{time_str} ({window_type}) - {slot['available_duration']} min")
+                    
+                    selected_slot_idx = st.selectbox(
+                        f"Choose slot for {day}:",
+                        options=[-1] + list(range(len(slot_options))),
+                        format_func=lambda x: "❌ No workout" if x == -1 else f"✅ {slot_options[x]}",
+                        key=f"slot_{day}"
+                    )
+                    
+                    if selected_slot_idx >= 0:
+                        selected_slot = day_slots[selected_slot_idx]
+                        availability[day] = {
+                            "available": True,
+                            "calendar_slot": selected_slot,
+                            "start_time": selected_slot['start'],
+                            "duration": "45 minutes",
+                            "window_type": selected_slot['window_type'],
+                            "source": "calendar"
+                        }
+                    else:
+                        availability[day] = {"available": False}
+                    
+                    # Manual override option
+                    if st.checkbox(f"Manual override for {day}", key=f"override_{day}"):
+                        st.info("⚙️ Manual settings will override calendar detection")
+                        
+                        manual_available = st.checkbox(f"Available for workout", key=f"manual_avail_{day}")
+                        
+                        if manual_available:
+                            manual_time = st.time_input(f"Preferred time:", key=f"manual_time_{day}")
+                            manual_duration = st.selectbox(
+                                f"Duration:",
+                                ["30 minutes", "45 minutes", "60 minutes", "90 minutes"],
+                                key=f"manual_duration_{day}"
+                            )
+                            
+                            availability[day] = {
+                                "available": True,
+                                "manual_override": True,
+                                "preferred_time": manual_time.strftime('%H:%M'),
+                                "duration": manual_duration,
+                                "source": "manual_override"
+                            }
+                        else:
+                            availability[day] = {"available": False, "manual_override": True}
+                
+                else:
+                    st.warning(f"⚠️ No available slots detected for {day}")
+                    
+                    # Manual input for days with no calendar availability
+                    manual_available = st.checkbox(f"Add manual workout time for {day}", key=f"manual_add_{day}")
+                    
+                    if manual_available:
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            manual_time = st.time_input(f"Time:", key=f"add_time_{day}")
+                        with col2:
+                            manual_duration = st.selectbox(
+                                f"Duration:",
+                                ["30 minutes", "45 minutes", "60 minutes", "90 minutes"],
+                                key=f"add_duration_{day}"
+                            )
+                        
+                        st.warning("⚠️ This may conflict with your calendar. Double-check manually.")
+                        
+                        availability[day] = {
+                            "available": True,
+                            "manual_override": True,
+                            "preferred_time": manual_time.strftime('%H:%M'),
+                            "duration": manual_duration,
+                            "source": "manual_addition"
+                        }
+                    else:
+                        availability[day] = {"available": False}
+        
+        return availability
+        
+    except Exception as e:
+        st.error(f"❌ Error accessing calendar: {str(e)}")
+        st.info("Falling back to manual availability setup...")
+        return render_manual_availability_setup()
+
+
+def render_manual_availability_setup():
+    """Render manual availability setup."""
+    st.subheader("⚙️ Manual Availability Setup")
+    
+    # Quick setup option
+    setup_type = st.radio(
+        "Setup method:",
+        ["⚡ Quick Setup", "🔧 Day-by-Day Setup"],
+        key="manual_setup_type"
+    )
+    
+    availability = {}
+    
+    if setup_type == "⚡ Quick Setup":
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            workout_days = st.number_input("Workouts per week:", min_value=1, max_value=7, value=3)
+        
+        with col2:
+            default_time = st.time_input("Default time:", value=time(18, 0))
+        
+        with col3:
+            default_duration = st.selectbox(
+                "Default duration:",
+                ["30 minutes", "45 minutes", "60 minutes", "90 minutes"],
+                index=1
+            )
+        
+        # Suggest optimal days
+        day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+        if workout_days == 3:
+            suggested_days = ["Monday", "Wednesday", "Friday"]
+        elif workout_days == 4:
+            suggested_days = ["Monday", "Tuesday", "Thursday", "Friday"]
+        elif workout_days == 5:
+            suggested_days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"]
+        else:
+            suggested_days = day_names[:workout_days]
+        
+        selected_days = st.multiselect(
+            "Workout days:",
+            day_names,
+            default=suggested_days
+        )
+        
+        # Build availability
+        for day in day_names:
+            if day in selected_days:
+                availability[day] = {
+                    "available": True,
+                    "preferred_time": default_time.strftime('%H:%M'),
+                    "duration": default_duration,
+                    "source": "manual_quick"
+                }
+            else:
+                availability[day] = {"available": False}
+    
+    else:
+        # Day-by-day setup
+        for day in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]:
+            col1, col2, col3 = st.columns([2, 3, 2])
+            
+            with col1:
+                available = st.checkbox(f"**{day}**", key=f"manual_available_{day}")
+            
+            with col2:
+                if available:
+                    time_slot = st.time_input(
+                        "Time:",
+                        value=time(18, 0),
+                        key=f"manual_time_slot_{day}"
+                    )
+                else:
+                    time_slot = None
+            
+            with col3:
+                if available:
+                    duration = st.selectbox(
+                        "Duration:",
+                        ["30 minutes", "45 minutes", "60 minutes", "90 minutes"],
+                        index=1,
+                        key=f"manual_duration_slot_{day}"
+                    )
+                else:
+                    duration = None
+            
+            availability[day] = {
+                "available": available,
+                "preferred_time": time_slot.strftime('%H:%M') if time_slot else None,
+                "duration": duration,
+                "source": "manual_detailed"
+            } if available else {"available": False}
+    
+    return availability
+
+
+def render_availability_summary(availability):
+    """Render availability summary."""
+    with st.expander("📋 Availability Summary", expanded=True):
+        workout_count = sum(1 for day_avail in availability.values() if day_avail.get("available"))
+        st.write(f"**Total workout days:** {workout_count}")
+        
+        for day, avail in availability.items():
+            if avail.get("available"):
+                time_info = ""
+                if avail.get("start_time"):
+                    time_info = avail["start_time"].strftime('%I:%M %p')
+                elif avail.get("preferred_time"):
+                    time_info = datetime.strptime(avail["preferred_time"], '%H:%M').strftime('%I:%M %p')
+                
+                source_icon = "🗓️" if "calendar" in avail.get("source", "") else "⚙️"
+                override_note = " (Override)" if avail.get("manual_override") else ""
+                
+                st.write(f"{source_icon} **{day}**: {avail.get('duration', 'N/A')} at {time_info}{override_note}")
+            else:
+                st.write(f"🛌 **{day}**: Rest day")
+
+
+def generate_schedule_with_calendar(availability, preferences, cal_service):
+    """Generate schedule and optionally book in calendar."""
+    # Validate availability
+    workout_days = sum(1 for day_avail in availability.values() if day_avail.get("available"))
+    if workout_days == 0:
+        st.error("❌ Please select at least one workout day!")
+        return
+    
+    with st.spinner("Creating your personalized weekly schedule..."):
+        try:
+            # Create the schedule
+            schedule = st.session_state.fitness_coach.create_weekly_schedule(
+                availability, preferences
+            )
+            
+            if schedule and schedule.get("micro_plan"):
+                st.success("✅ Weekly schedule created successfully!")
+                
+                # Update session state
+                st.session_state.active_schedule = schedule
+                
+                # Show preview with calendar booking options
+                render_schedule_preview_with_calendar(schedule, availability, cal_service)
+                
+            else:
+                st.error("❌ Failed to create schedule. Please try again.")
+                
+        except Exception as e:
+            st.error(f"Error creating schedule: {str(e)}")
+
+
+def render_schedule_preview_with_calendar(schedule, availability, cal_service):
+    """Show schedule preview with calendar booking options."""
     st.subheader("📅 Schedule Preview")
     
     # Summary stats
@@ -910,64 +1332,229 @@ def render_schedule_preview(schedule):
     with col3:
         st.metric("Avg. Per Session", f"{total_time//workout_days if workout_days > 0 else 0} min")
     
-    # Daily breakdown
+    # Calendar integration status
+    calendar_ready = (cal_service and cal_service.is_authenticated())
+    
+    if calendar_ready:
+        st.success("🗓️ Ready to book workouts in your calendar!")
+    else:
+        st.info("📅 Connect calendar in the expandable section above to auto-book workouts")
+    
+    # Daily breakdown with booking options
     for day, workout in schedule["micro_plan"].items():
+        day_availability = availability.get(day, {})
+        
         if workout.get("type") != "Rest":
-            with st.expander(f"🏋️‍♂️ {day} - {workout.get('type', 'Workout')}", expanded=False):
-                col1, col2 = st.columns(2)
+            with st.expander(f"🏋️‍♂️ {day} - {workout.get('type', 'Workout')}", expanded=True):
+                col1, col2 = st.columns([2, 1])
+                
                 with col1:
+                    # Workout details
                     st.write(f"**⏰ Duration:** {workout.get('duration', 'N/A')}")
                     st.write(f"**🎯 Focus:** {workout.get('focus', 'N/A')}")
-                with col2:
                     st.write(f"**💪 Intensity:** {workout.get('intensity', 'Moderate')}")
                     st.write(f"**📍 Location:** {workout.get('location', 'Flexible')}")
+                    st.write(f"**📝 Details:** {workout.get('details', 'No details provided')}")
+                    
+                    # Timing information
+                    if day_availability.get("start_time"):
+                        scheduled_time = day_availability["start_time"]
+                        st.info(f"🕐 Scheduled for: {scheduled_time.strftime('%I:%M %p')}")
+                    elif day_availability.get("preferred_time"):
+                        time_str = datetime.strptime(day_availability["preferred_time"], '%H:%M').strftime('%I:%M %p')
+                        st.info(f"🕐 Suggested time: {time_str}")
                 
-                st.write(f"**📝 Details:** {workout.get('details', 'No details provided')}")
+                with col2:
+                    # Calendar booking section
+                    if calendar_ready and day_availability.get("available"):
+                        st.write("**📅 Calendar:**")
+                        
+                        if st.button(f"📅 Book", key=f"book_{day}", use_container_width=True):
+                            book_workout_in_calendar(cal_service, day, workout, day_availability)
+                    
+                    elif not calendar_ready:
+                        st.write("**📅 Calendar:**")
+                        st.caption("Connect to book")
+                    else:
+                        st.write("**📅 Calendar:**")
+                        st.caption("Not scheduled")
         else:
             st.write(f"🛌 **{day}**: Rest and recovery day")
     
-    # Activation buttons
+    # Bulk actions
     st.subheader("🎯 Next Steps")
-    col1, col2, col3 = st.columns(3)
+    
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        if st.button("✅ Activate This Schedule", type="primary", key="activate_schedule_btn"):
+        if st.button("✅ Activate Schedule", type="primary", key="activate_with_cal"):
             st.session_state.fitness_coach.activate_schedule(schedule["schedule_id"])
-            st.success("🎉 Schedule activated! Check 'Current Schedule' tab.")
+            st.success("🎉 Schedule activated!")
             st.balloons()
-            
-            # Option to switch to current schedule tab
-            if st.button("📅 View Active Schedule", key="view_active_btn"):
-                st.switch_page("📅 Current Schedule")
     
     with col2:
-        if st.button("🔄 Generate Different Schedule", key="regenerate_schedule_btn"):
-            st.info("Modify your preferences above and generate again.")
-            st.rerun()
+        if calendar_ready and st.button("📅 Book All", key="book_all"):
+            book_all_workouts_in_calendar(schedule, availability, cal_service)
     
     with col3:
-        if st.button("💬 I need to adjust this", key="feedback_schedule_btn"):
-            st.info("Schedule feedback feature coming soon!")
+        if st.button("🔄 Try Different", key="regenerate_with_cal"):
+            st.rerun()
+    
+    with col4:
+        if st.button("💬 Feedback", key="feedback_with_cal"):
+            st.info("Feedback feature coming soon!")
+
+
+def book_workout_in_calendar(cal_service, day, workout, day_availability):
+    """Book a single workout in Google Calendar."""
+    try:
+        # Determine workout time
+        workout_time = None
+        if day_availability.get("start_time"):
+            workout_time = day_availability["start_time"]
+        elif day_availability.get("preferred_time"):
+            time_obj = datetime.strptime(day_availability["preferred_time"], '%H:%M').time()
+            workout_time = datetime.combine(datetime.now().date(), time_obj)
+        
+        if not workout_time:
+            st.error("❌ No time specified for workout")
+            return
+        
+        # Adjust workout_time to be the correct day of the week
+        days_ahead = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].index(day)
+        current_day = datetime.now().weekday()
+        days_to_add = (days_ahead - current_day) % 7
+        if days_to_add == 0 and datetime.now().time() > workout_time.time():
+            days_to_add = 7  # Next week if time has passed today
+        
+        target_date = datetime.now().date() + timedelta(days=days_to_add)
+        scheduled_datetime = datetime.combine(target_date, workout_time.time())
+        
+        # Extract duration in minutes
+        duration_str = workout.get('duration', '45 minutes')
+        duration_minutes = int(duration_str.split()[0]) if duration_str.split()[0].isdigit() else 45
+        
+        event_id = cal_service.create_workout_event(
+            workout_details=workout,
+            start_time=scheduled_datetime,
+            duration_minutes=duration_minutes
+        )
+        
+        if event_id:
+            st.success(f"✅ {day}'s workout booked for {scheduled_datetime.strftime('%I:%M %p')}!")
+        else:
+            st.error(f"❌ Failed to book {day}'s workout")
+            
+    except Exception as e:
+        st.error(f"Error booking workout: {str(e)}")
+
+
+def book_all_workouts_in_calendar(schedule, availability, cal_service):
+    """Book all workouts in the schedule to Google Calendar."""
+    bookings_successful = 0
+    bookings_failed = 0
+    
+    with st.spinner("Booking all workouts in your calendar..."):
+        for day, workout in schedule["micro_plan"].items():
+            day_availability = availability.get(day, {})
+            
+            if workout.get("type") != "Rest" and day_availability.get("available"):
+                try:
+                    # Determine workout time
+                    workout_time = None
+                    if day_availability.get("start_time"):
+                        workout_time = day_availability["start_time"]
+                    elif day_availability.get("preferred_time"):
+                        time_obj = datetime.strptime(day_availability["preferred_time"], '%H:%M').time()
+                        workout_time = datetime.combine(datetime.now().date(), time_obj)
+                    
+                    if workout_time:
+                        # Adjust for correct day
+                        days_ahead = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].index(day)
+                        current_day = datetime.now().weekday()
+                        days_to_add = (days_ahead - current_day) % 7
+                        if days_to_add == 0 and datetime.now().time() > workout_time.time():
+                            days_to_add = 7
+                        
+                        target_date = datetime.now().date() + timedelta(days=days_to_add)
+                        scheduled_datetime = datetime.combine(target_date, workout_time.time())
+                        
+                        duration_str = workout.get('duration', '45 minutes')
+                        duration_minutes = int(duration_str.split()[0]) if duration_str.split()[0].isdigit() else 45
+                        
+                        event_id = cal_service.create_workout_event(
+                            workout_details=workout,
+                            start_time=scheduled_datetime,
+                            duration_minutes=duration_minutes
+                        )
+                        
+                        if event_id:
+                            bookings_successful += 1
+                        else:
+                            bookings_failed += 1
+                    
+                except Exception as e:
+                    print(f"Error booking {day}: {str(e)}")
+                    bookings_failed += 1
+    
+    if bookings_successful > 0:
+        st.success(f"🎉 Successfully booked {bookings_successful} workout(s) in your calendar!")
+    
+    if bookings_failed > 0:
+        st.warning(f"⚠️ Failed to book {bookings_failed} workout(s). Please try booking them individually.")
+
+
+def render_schedule_history():
+    """Display schedule history."""
+    st.header("📚 Schedule History")
+    
+    if not st.session_state.schedule_history:
+        st.info("No schedule history found.")
+        return
+    
+    st.write(f"Total schedules: {len(st.session_state.schedule_history)}")
+    
+    for i, schedule in enumerate(st.session_state.schedule_history):
+        schedule_id = schedule.get("schedule_id", f"Schedule {i+1}")
+        created_date = schedule.get("created_at", "Unknown date")
+        
+        with st.expander(f"📋 {schedule_id} - {created_date}"):
+            col1, col2 = st.columns(2)
+            
+            with col1:
+                st.write("**Macro Plan:**")
+                st.write(schedule.get("macro_plan", "No macro plan"))
+            
+            with col2:
+                if st.button(f"🔄 Reactivate", key=f"reactivate_{i}"):
+                    st.session_state.fitness_coach.activate_schedule(schedule_id)
+                    st.session_state.active_schedule = schedule
+                    st.success(f"✅ {schedule_id} reactivated!")
+                    st.rerun()
+            
+            if schedule.get("micro_plan"):
+                st.write("**Weekly Plan:**")
+                for day, workout in schedule["micro_plan"].items():
+                    st.write(f"- **{day}**: {workout.get('type', 'Rest')} ({workout.get('duration', 'N/A')})")
 
 
 def create_app():
-    """Enhanced Streamlit app with proper session state initialization."""
+    """Enhanced Streamlit app with calendar integration for weekly schedules only."""
     st.set_page_config(
         page_title=settings.APP_NAME,
         layout="wide",
         initial_sidebar_state="expanded"
     )
     
-    # Initialize app FIRST - this sets up all session state variables
+    # Initialize app
     initialize_app()
     
     st.title(f"🏋️‍♂️ {settings.APP_NAME} v{settings.APP_VERSION}")
     
-    # Now we can safely access session state variables
     # Sidebar with user stats
     with st.sidebar:
         st.header("👤 User Info")
-        stats = st.session_state.user_stats  # This is now safely initialized
+        stats = st.session_state.user_stats
         st.info(f"""
         **User ID:** {stats['user_id']}
         **Profile:** {'✅' if stats['has_profile'] else '❌'}
@@ -975,10 +1562,17 @@ def create_app():
         **Feedback:** {stats['total_feedback']}
         """)
         
+        # Calendar status
+        cal_service = st.session_state.calendar_service
+        if cal_service.is_authenticated():
+            st.success("📅 Calendar Connected")
+        else:
+            st.info("📅 Calendar Not Connected")
+        
         st.header("ℹ️ About")
         st.info(
             "Your data is saved locally and will persist between sessions. "
-            "All your preferences and schedules are remembered!"
+            "Calendar integration helps with weekly scheduling!"
         )
         
         st.header("⚠️ Disclaimer")
@@ -988,7 +1582,7 @@ def create_app():
             "fitness program."
         )
     
-    # Main navigation - now safe to check user_profile
+    # Main navigation
     if st.session_state.user_profile is None:
         # Force profile setup first
         render_profile_setup()
@@ -1008,7 +1602,7 @@ def create_app():
             render_current_schedule()
         
         with tab3:
-            render_schedule_creation()
+            render_schedule_creation()  # Now includes calendar integration for weekly schedules
         
         with tab4:
             render_schedule_history()
@@ -1016,7 +1610,11 @@ def create_app():
 
 def main():
     """Main entry point."""
-    create_app()
+    try:
+        create_app()
+    except Exception as e:
+        st.error(f"Application error: {str(e)}")
+        st.write("Please refresh the page and try again.")
 
 
 if __name__ == "__main__":

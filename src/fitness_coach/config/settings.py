@@ -25,10 +25,15 @@ class Settings:
     APP_NAME: str = "AI Fitness Coach"
     APP_VERSION: str = "0.1.0"
     
-    # Future integrations
-    GOOGLE_CALENDAR_ENABLED: bool = os.getenv("GOOGLE_CALENDAR_ENABLED", "false").lower() == "true"
-    TERRA_API_KEY: str = os.getenv("TERRA_API_KEY", "")
-    TERRA_WEBHOOK_SECRET: str = os.getenv("TERRA_WEBHOOK_SECRET", "")
+    # Google Calendar Configuration
+    GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
+    GOOGLE_CLIENT_SECRET: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
+    GOOGLE_CALENDAR_ENABLED: bool = os.getenv("GOOGLE_CALENDAR_ENABLED", "true").lower() == "true"
+    
+    # Default work hours
+    DEFAULT_WORK_START: str = os.getenv("DEFAULT_WORK_START", "09:00")
+    DEFAULT_WORK_END: str = os.getenv("DEFAULT_WORK_END", "17:00")
+    DEFAULT_WORK_DAYS: str = os.getenv("DEFAULT_WORK_DAYS", "Monday,Tuesday,Wednesday,Thursday,Friday")
 
 
 settings = Settings()
